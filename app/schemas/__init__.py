@@ -1,3 +1,4 @@
+from app.schemas.interaction import InteractionEventIn
 from app.schemas.item import ItemCreate, ItemRead
 from app.schemas.rating import RatingCreate, RatingRead
 from app.schemas.recommendation import (
@@ -12,6 +13,7 @@ __all__ = [
     "UserRead",
     "ItemCreate",
     "ItemRead",
+    "InteractionEventIn",
     "RatingCreate",
     "RatingRead",
     "RecommendationItem",

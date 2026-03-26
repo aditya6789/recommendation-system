@@ -14,6 +14,11 @@ class Settings(BaseSettings):
     redis_url: str = "redis://localhost:6379/0"
     enable_redis_cache: bool = False
     log_level: str = "INFO"
+    enable_kafka: bool = False
+    kafka_bootstrap_servers: str = "localhost:9092"
+    kafka_topic_events: str = "recommendation.events"
+    kafka_consumer_group: str = "recsys-feature-updater"
+    enable_bandit_auto: bool = True
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

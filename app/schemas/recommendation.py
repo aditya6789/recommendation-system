@@ -12,6 +12,8 @@ class RecommendationItem(BaseModel):
 
 class RecommendationResponse(BaseModel):
     user_id: int
+    experiment_variant: str
+    model_version_id: int | None = None
     recommendations: list[RecommendationItem]
 
 

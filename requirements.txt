@@ -13,3 +13,6 @@ redis
 streamlit
 httpx
 requests
+prometheus-client
+kafka-python
+alembic

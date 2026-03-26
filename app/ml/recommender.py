@@ -10,6 +10,8 @@ from sklearn.decomposition import TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
+from app.ml.vector_index import VectorIndex
+
 
 @dataclass
 class RecommendationResult:
@@ -31,10 +33,19 @@ class RecommenderEngine:
         self.content_similarity: np.ndarray | None = None
         self.item_index: dict[int, int] = {}
         self.ready = False
+        self.user_activity = pd.Series(dtype=float)
+        self.item_popularity = pd.Series(dtype=float)
+        self.item_genre_map: dict[int, str] = {}
+        self.tfidf_matrix = None
+        self.vector_index = VectorIndex()
 
     def fit(self, users_df: pd.DataFrame, items_df: pd.DataFrame, ratings_df: pd.DataFrame) -> None:
         """Fit all recommendation models from tabular data."""
         self.items_df = items_df.copy()
+        self.item_genre_map = {
+            int(row["id"]): str(row.get("genre", "") or "")
+            for _, row in items_df.iterrows()
+        }
         self.popularity = (
             ratings_df.groupby("item_id")["rating"].mean().sort_values(ascending=False)
             if not ratings_df.empty
@@ -51,22 +62,54 @@ class RecommenderEngine:
             self.ready = True
             return
 
-        matrix = ratings_df.pivot_table(
-            index="user_id", columns="item_id", values="rating", fill_value=0.0
+        processed = self._preprocess_interactions(ratings_df)
+        self.user_activity = processed.groupby("user_id")["adjusted_score"].count().astype(float)
+        self.item_popularity = (
+            processed.groupby("item_id")["adjusted_score"].sum().sort_values(ascending=False)
         )
-        self.user_item_matrix = matrix
 
-        user_sim = cosine_similarity(matrix)
-        self.user_similarity = pd.DataFrame(user_sim, index=matrix.index, columns=matrix.index)
+        adjusted_matrix = processed.pivot_table(
+            index="user_id", columns="item_id", values="adjusted_score", fill_value=0.0
+        )
+        self.user_item_matrix = adjusted_matrix
 
-        item_sim = cosine_similarity(matrix.T)
+        user_sim = cosine_similarity(adjusted_matrix)
+        self.user_similarity = pd.DataFrame(
+            user_sim, index=adjusted_matrix.index, columns=adjusted_matrix.index
+        )
+
+        item_sim = cosine_similarity(adjusted_matrix.T)
         self.item_similarity = pd.DataFrame(
-            item_sim, index=matrix.columns, columns=matrix.columns
+            item_sim, index=adjusted_matrix.columns, columns=adjusted_matrix.columns
         )
 
-        self._fit_svd(matrix)
+        self._fit_svd(adjusted_matrix)
         self._fit_content_model(items_df)
         self.ready = True
+
+    def _preprocess_interactions(self, ratings_df: pd.DataFrame) -> pd.DataFrame:
+        """Apply implicit signal, confidence weights, and time-decay."""
+        processed = ratings_df.copy()
+        if "created_at" not in processed.columns:
+            processed["created_at"] = pd.Timestamp.utcnow()
+        processed["created_at"] = pd.to_datetime(processed["created_at"], errors="coerce").fillna(
+            pd.Timestamp.utcnow()
+        )
+
+        now = pd.Timestamp.utcnow()
+        age_days = (now - processed["created_at"]).dt.total_seconds() / 86400.0
+        decay = np.exp(-0.015 * age_days.clip(lower=0))
+
+        # Normalize explicit ratings (0-5 -> 0-1), add implicit feedback signal.
+        explicit_norm = (processed["rating"].clip(lower=0.0, upper=5.0) / 5.0).astype(float)
+        implicit_signal = (processed["rating"] > 0).astype(float)
+
+        user_interaction_count = processed.groupby("user_id")["item_id"].transform("count").astype(float)
+        confidence = 1.0 + np.log1p(user_interaction_count) * 0.35
+
+        adjusted = (0.75 * explicit_norm + 0.25 * implicit_signal) * confidence * decay
+        processed["adjusted_score"] = adjusted.astype(float)
+        return processed
 
     def _fit_svd(self, matrix: pd.DataFrame) -> None:
         if matrix.empty:
@@ -88,6 +131,8 @@ class RecommenderEngine:
     def _fit_content_model(self, items_df: pd.DataFrame) -> None:
         if items_df.empty:
             self.content_similarity = np.array([])
+            self.tfidf_matrix = None
+            self.vector_index.fit([], np.array([]))
             return
 
         text_series = (
@@ -99,7 +144,12 @@ class RecommenderEngine:
         )
         vectorizer = TfidfVectorizer(stop_words="english")
         tfidf_matrix = vectorizer.fit_transform(text_series)
+        self.tfidf_matrix = tfidf_matrix
         self.content_similarity = cosine_similarity(tfidf_matrix, tfidf_matrix)
+        self.vector_index.fit(
+            item_ids=[int(x) for x in items_df["id"].tolist()],
+            vectors=tfidf_matrix.toarray().astype(np.float32),
+        )
 
     def recommend_user_based(self, user_id: int, top_n: int = 10) -> list[RecommendationResult]:
         """User-based collaborative recommendations."""
@@ -161,17 +211,39 @@ class RecommenderEngine:
 
     def recommend_content_for_user(self, user_id: int, top_n: int = 10) -> list[RecommendationResult]:
         """Content-based recommendations based on user's historical liked items."""
-        if self.content_similarity is None or self.items_df.empty:
+        if self.content_similarity is None or self.items_df.empty or self.tfidf_matrix is None:
             return []
         if user_id not in self.user_item_matrix.index:
             return []
 
         user_ratings = self.user_item_matrix.loc[user_id]
-        liked_items = user_ratings[user_ratings >= 3.5].index.tolist()
+        threshold = float(user_ratings[user_ratings > 0].median()) if (user_ratings > 0).any() else 0.0
+        liked_items = user_ratings[user_ratings >= max(threshold, 0.2)].index.tolist()
         if not liked_items:
             return []
 
-        aggregate_scores = np.zeros(len(self.items_df))
+        aggregate_scores = np.zeros(len(self.items_df), dtype=np.float32)
+        profile_weights = []
+        profile_vectors = []
+        for item_id in liked_items:
+            idx = self.item_index.get(int(item_id))
+            if idx is not None:
+                profile_vectors.append(self.tfidf_matrix[idx].toarray().flatten())
+                profile_weights.append(float(user_ratings.get(item_id, 1.0)))
+        if profile_vectors:
+            w = np.array(profile_weights, dtype=np.float32)
+            w = w / (w.sum() if w.sum() > 0 else 1.0)
+            user_profile = np.average(np.array(profile_vectors, dtype=np.float32), axis=0, weights=w)
+            ann_candidates = self.vector_index.query_by_vector(user_profile, top_n=top_n * 3)
+            rated_items = set(user_ratings[user_ratings > 0].index.tolist())
+            ann_results = [
+                RecommendationResult(item_id=item_id, score=score, source="ann_content")
+                for item_id, score in ann_candidates
+                if item_id not in rated_items
+            ]
+            if ann_results:
+                return ann_results[:top_n]
+
         for item_id in liked_items:
             idx = self.item_index.get(int(item_id))
             if idx is not None:
@@ -187,9 +259,44 @@ class RecommenderEngine:
         candidates.sort(key=lambda x: x.score, reverse=True)
         return candidates[:top_n]
 
+    def recommend_ann_for_user(self, user_id: int, top_n: int = 10) -> list[RecommendationResult]:
+        """ANN retrieval using profile vector over item embeddings."""
+        if self.tfidf_matrix is None or user_id not in self.user_item_matrix.index:
+            return []
+        user_ratings = self.user_item_matrix.loc[user_id]
+        liked_items = user_ratings[user_ratings > 0].index.tolist()
+        if not liked_items:
+            return []
+        profile_vectors = []
+        weights = []
+        for item_id in liked_items:
+            idx = self.item_index.get(int(item_id))
+            if idx is None:
+                continue
+            profile_vectors.append(self.tfidf_matrix[idx].toarray().flatten())
+            weights.append(float(user_ratings.get(item_id, 1.0)))
+        if not profile_vectors:
+            return []
+        w = np.array(weights, dtype=np.float32)
+        w = w / (w.sum() if w.sum() > 0 else 1.0)
+        user_profile = np.average(np.array(profile_vectors, dtype=np.float32), axis=0, weights=w)
+        rated_items = set(user_ratings[user_ratings > 0].index.tolist())
+        ann = self.vector_index.query_by_vector(user_profile, top_n=top_n * 2)
+        return [
+            RecommendationResult(item_id=item_id, score=score, source="ann")
+            for item_id, score in ann
+            if item_id not in rated_items
+        ][:top_n]
+
     def recommend_popular(self, top_n: int = 10) -> list[RecommendationResult]:
         """Cold-start fallback: return globally popular items."""
         results: list[RecommendationResult] = []
+        if not self.item_popularity.empty:
+            for item_id, score in self.item_popularity.head(top_n).items():
+                results.append(
+                    RecommendationResult(item_id=int(item_id), score=float(score), source="popular")
+                )
+            return results
         if not self.popularity.empty:
             for item_id, score in self.popularity.head(top_n).items():
                 results.append(
@@ -205,6 +312,13 @@ class RecommenderEngine:
 
     def similar_items(self, item_id: int, top_n: int = 10) -> list[RecommendationResult]:
         """Return similar items using item-cf, fallback to content similarity."""
+        ann_similar = self.vector_index.query_by_item(item_id=item_id, top_n=top_n)
+        if ann_similar:
+            return [
+                RecommendationResult(item_id=int(candidate_id), score=float(score), source="ann")
+                for candidate_id, score in ann_similar
+            ]
+
         if self.item_similarity is not None and item_id in self.item_similarity.columns:
             sims = self.item_similarity[item_id].sort_values(ascending=False)
             sims = sims.drop(index=item_id, errors="ignore").head(top_n)
@@ -242,25 +356,136 @@ class RecommenderEngine:
         if user_id not in self.user_item_matrix.index:
             return self.recommend_popular(top_n=top_n)
 
+        user_history = self.user_item_matrix.loc[user_id]
+        rated_items = user_history[user_history > 0]
+        activity_count = int(len(rated_items))
+        user_weights = self._dynamic_weights(user_id=user_id, activity_count=activity_count)
+
+        candidate_lists = {
+            "user_cf": self.recommend_user_based(user_id, top_n=top_n * 3),
+            "item_cf": self.recommend_item_based(user_id, top_n=top_n * 3),
+            "content": self.recommend_content_for_user(user_id, top_n=top_n * 3),
+            "svd": self.recommend_svd(user_id, top_n=top_n * 3),
+            "ann": self.recommend_ann_for_user(user_id, top_n=top_n * 3),
+        }
+        candidates = self._generate_candidates(candidate_lists)
+        combined = self._rank_candidates(candidates, candidate_lists, user_weights)
+
+        if not combined:
+            return self.recommend_popular(top_n=top_n)
+
+        ranked_items = self._apply_diversity_filter(combined, top_n=top_n)
+        return [RecommendationResult(item_id=item_id, score=score, source="hybrid") for item_id, score in ranked_items]
+
+    def recommend_hybrid_v1(self, user_id: int, top_n: int = 10) -> list[RecommendationResult]:
+        """Baseline hybrid without advanced re-ranking (A/B control variant)."""
+        if not self.ready:
+            return []
+        if user_id not in self.user_item_matrix.index:
+            return self.recommend_popular(top_n=top_n)
+
         rec_lists = [
             (self.recommend_user_based(user_id, top_n=top_n * 2), 0.25),
             (self.recommend_item_based(user_id, top_n=top_n * 2), 0.25),
             (self.recommend_content_for_user(user_id, top_n=top_n * 2), 0.20),
             (self.recommend_svd(user_id, top_n=top_n * 2), 0.30),
         ]
-
         combined: dict[int, float] = {}
-        source_track: dict[int, str] = {}
         for recs, weight in rec_lists:
             for rec in recs:
                 combined[rec.item_id] = combined.get(rec.item_id, 0.0) + rec.score * weight
-                source_track[rec.item_id] = "hybrid"
 
         if not combined:
             return self.recommend_popular(top_n=top_n)
 
         ranked = sorted(combined.items(), key=lambda x: x[1], reverse=True)[:top_n]
-        return [
-            RecommendationResult(item_id=item_id, score=score, source=source_track[item_id])
-            for item_id, score in ranked
-        ]
+        return [RecommendationResult(item_id=item_id, score=score, source="hybrid_v1") for item_id, score in ranked]
+
+    def _dynamic_weights(self, user_id: int, activity_count: int) -> dict[str, float]:
+        """Choose hybrid weights based on interaction density and profile richness."""
+        if activity_count < 3:
+            return {
+                "user_cf": 0.10,
+                "item_cf": 0.10,
+                "content": 0.30,
+                "ann": 0.20,
+                "svd": 0.10,
+                "popular": 0.20,
+            }
+        if activity_count < 8:
+            return {
+                "user_cf": 0.20,
+                "item_cf": 0.20,
+                "content": 0.20,
+                "ann": 0.15,
+                "svd": 0.15,
+                "popular": 0.10,
+            }
+        return {
+            "user_cf": 0.20,
+            "item_cf": 0.20,
+            "content": 0.10,
+            "ann": 0.20,
+            "svd": 0.25,
+            "popular": 0.05,
+        }
+
+    def _generate_candidates(
+        self, candidate_lists: dict[str, list[RecommendationResult]]
+    ) -> set[int]:
+        """Candidate generation stage from all retrieval methods."""
+        candidates: set[int] = set()
+        for recs in candidate_lists.values():
+            candidates.update(rec.item_id for rec in recs)
+        return candidates
+
+    def _rank_candidates(
+        self,
+        candidates: set[int],
+        candidate_lists: dict[str, list[RecommendationResult]],
+        user_weights: dict[str, float],
+    ) -> dict[int, float]:
+        """Ranking stage combining method scores with popularity novelty balancing."""
+        score_maps: dict[str, dict[int, float]] = {}
+        for source, recs in candidate_lists.items():
+            score_maps[source] = {rec.item_id: float(rec.score) for rec in recs}
+
+        popularity_max = float(self.item_popularity.max()) if not self.item_popularity.empty else 1.0
+        combined: dict[int, float] = {}
+        for item_id in candidates:
+            score = 0.0
+            for source in ("user_cf", "item_cf", "content", "svd", "ann"):
+                score += user_weights[source] * score_maps.get(source, {}).get(item_id, 0.0)
+
+            popularity_score = (
+                float(self.item_popularity.get(item_id, 0.0)) / popularity_max if popularity_max > 0 else 0.0
+            )
+            # Slight novelty boost to avoid over-concentrating only popular items.
+            novelty_boost = 1.0 - min(popularity_score, 1.0)
+            score += user_weights.get("popular", 0.0) * popularity_score
+            score += 0.05 * novelty_boost
+            combined[item_id] = score
+        return combined
+
+    def _apply_diversity_filter(self, combined: dict[int, float], top_n: int) -> list[tuple[int, float]]:
+        """Simple diversity re-ranking: limit same-genre streak in top results."""
+        ranked = sorted(combined.items(), key=lambda x: x[1], reverse=True)
+        selected: list[tuple[int, float]] = []
+        genre_counts: dict[str, int] = {}
+
+        for item_id, score in ranked:
+            genre = self.item_genre_map.get(item_id, "").strip().lower()
+            if genre and genre_counts.get(genre, 0) >= 2:
+                continue
+            selected.append((item_id, score))
+            if genre:
+                genre_counts[genre] = genre_counts.get(genre, 0) + 1
+            if len(selected) >= top_n:
+                return selected
+
+        for item_id, score in ranked:
+            if len(selected) >= top_n:
+                break
+            if (item_id, score) not in selected:
+                selected.append((item_id, score))
+        return selected[:top_n]
