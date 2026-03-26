@@ -1,0 +1,161 @@
+{
+  "info": {
+    "_postman_id": "8b24ab44-ef8d-4e30-a5ee-6f6b2e7f7f2d",
+    "name": "Recommendation System API",
+    "description": "Postman collection for FastAPI recommendation system.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    {
+      "key": "baseUrl",
+      "value": "http://127.0.0.1:8000"
+    },
+    {
+      "key": "userId",
+      "value": "1"
+    },
+    {
+      "key": "itemId",
+      "value": "1"
+    }
+  ],
+  "item": [
+    {
+      "name": "Health Check",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/health",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "health"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Create User",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"name\": \"Test User\",\n  \"email\": \"testuser@example.com\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/user",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "user"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Create Item",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"title\": \"New Sci-Fi Movie\",\n  \"genre\": \"Sci-Fi\",\n  \"tags\": \"space ai future\",\n  \"description\": \"A futuristic AI space adventure\"\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/item",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "item"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Rate Item",
+      "request": {
+        "method": "POST",
+        "header": [
+          {
+            "key": "Content-Type",
+            "value": "application/json"
+          }
+        ],
+        "body": {
+          "mode": "raw",
+          "raw": "{\n  \"user_id\": 1,\n  \"item_id\": 1,\n  \"rating\": 4.5\n}"
+        },
+        "url": {
+          "raw": "{{baseUrl}}/rate",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "rate"
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Recommendations",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/recommend/{{userId}}?n=10",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "recommend",
+            "{{userId}}"
+          ],
+          "query": [
+            {
+              "key": "n",
+              "value": "10"
+            }
+          ]
+        }
+      }
+    },
+    {
+      "name": "Get Similar Items",
+      "request": {
+        "method": "GET",
+        "header": [],
+        "url": {
+          "raw": "{{baseUrl}}/similar/{{itemId}}?n=10",
+          "host": [
+            "{{baseUrl}}"
+          ],
+          "path": [
+            "similar",
+            "{{itemId}}"
+          ],
+          "query": [
+            {
+              "key": "n",
+              "value": "10"
+            }
+          ]
+        }
+      }
+    }
+  ]
+}

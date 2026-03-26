@@ -1,6 +1,14 @@
 """Load sample MovieLens-like data into PostgreSQL."""
 
+import os
+import sys
+
 from sqlalchemy import select
+
+# Ensure project root is on sys.path when running this file directly.
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
 
 from app.db.database import Base, SessionLocal, engine
 from app.models import Item, Rating, User
