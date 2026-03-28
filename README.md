@@ -1,54 +1,207 @@
-# Production Recommendation System (FastAPI + Python ML)
+# Production Recommendation System
 
-A production-style recommendation backend inspired by Netflix/Amazon with:
+**Netflix / Amazon–style recommendations API** — hybrid collaborative + content + latent factors, learning-to-rank, real-time events, and experimentation. I built it with **FastAPI**, **scikit-learn**, and **PostgreSQL**.
 
-- User-based collaborative filtering
-- Item-based collaborative filtering
-- Content-based filtering (genre/tags/description)
-- Matrix factorization (SVD)
-- Hybrid ranking model
-- Cold-start handling for new users/items
-- FastAPI API endpoints
-- PostgreSQL via SQLAlchemy ORM
-- Optional Redis caching
-- Optional Streamlit UI for quick testing
+[![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)](https://www.python.org/)
+[![FastAPI](https://img.shields.io/badge/FastAPI-0.100%2B-009688?logo=fastapi&logoColor=white)](https://fastapi.tiangolo.com/)
+[![ML](https://img.shields.io/badge/ML-scikit--learn-orange?logo=scikitlearn&logoColor=white)](https://scikit-learn.org/)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Status](https://img.shields.io/badge/Status-Active-success.svg)]()
+
+> ⭐ **If this repo helps you, a star would mean a lot.**
+
+---
+
+## Overview
+
+I wanted a **production-style recommendation backend**, not a one-off notebook: users and items in Postgres, ratings and events driving the models, and APIs that return **Top-N recommendations** and **similar items** — the same class of problem Netflix, Amazon, and Spotify work on.
+
+I went beyond a minimal demo: **Redis caching**, **optional Kafka**, **Prometheus metrics**, **A/B + bandit experiments**, **offline evaluation**, and a **Docker Compose** stack so the whole pipeline runs locally end to end.
+
+---
+
+## Why I built this
+
+- **Architecture:** I structured it like real systems — candidate generation → ranking → logging → metrics — so the codebase stays explainable in interviews and on my resume.
+- **Depth:** I implemented hybrid models, cold start, streaming-style events, and evaluation hooks because those topics keep coming up in ML engineering roles.
+- **Room to grow:** The ML, services, and API layers are split so I can swap in deep learning or a dedicated vector DB without rewriting everything.
+
+---
+
+## Features
+
+Here’s what I implemented end to end:
+
+### Machine learning
+
+- User-based and item-based **collaborative filtering** (cosine similarity)
+- **Content-based** retrieval (TF-IDF over genre, tags, description)
+- **Matrix factorization** via truncated SVD
+- **Hybrid** scoring with time-decay, confidence weighting, and diversity-aware re-ranking
+- **Approximate nearest neighbors** for similar items (FAISS when installed; sklearn fallback)
+- **Learning-to-rank** layer (gradient boosting) to rerank `v2` candidates
+- **Cold start:** popularity / content fallbacks for new users and items
+
+### Backend
+
+- **FastAPI** REST API with validation and OpenAPI docs
+- **PostgreSQL** + **SQLAlchemy** ORM
+- **Optional Redis** for recommendation and feature caching
+- **Static web UI** at `/` plus optional **Streamlit** tester
+- **Alembic** migrations for schema versioning
+
+### Infrastructure & observability
+
+- **Dockerfile** + **docker-compose** (API, Postgres, Redis, Kafka, Zookeeper, Prometheus, Grafana)
+- **Prometheus** metrics at `/metrics`
+- **Kafka** (optional) for event streaming + **consumer worker** for rolling feature updates
+
+### Experimentation
+
+- **A/B** variants (`v1` / `v2`) and experiment summaries
+- **Thompson Sampling** bandit for `strategy=auto` (configurable)
+- **Event logging** (impressions, clicks, watches) for online KPIs
+- **Offline** Precision@K, Recall@K, MAP@K, NDCG@K, Coverage@K
+
+---
+
+## System Architecture
+
+```mermaid
+flowchart TB
+  subgraph clients["Clients"]
+    UI[Web UI / API clients]
+  end
+
+  subgraph api_layer["API"]
+    FA[FastAPI routes]
+  end
+
+  subgraph services_layer["Services"]
+    SV[Cache, LTR, experiments, feature store]
+  end
+
+  subgraph ml_layer["ML"]
+    RE[Recommender engine]
+    VI[Vector index / ANN]
+  end
+
+  subgraph data_layer["Data stores"]
+    PG[(PostgreSQL)]
+    RD[(Redis)]
+  end
+
+  subgraph streaming["Optional streaming"]
+    KF[Kafka]
+    KC[Consumer worker]
+  end
+
+  UI --> FA
+  FA --> SV
+  SV --> RE
+  RE --> VI
+  RE --> PG
+  SV --> RD
+  FA --> PG
+  FA -.->|publish events| KF
+  KF --> KC
+  KC -->|update features| PG
+```
+
+**How a request flows:** user id → load history and catalog → **candidate generation** (several retrievers) → **ranking** (hybrid + LTR on `v2`) → Top-N response and impression logging.
+
+---
+
+## ML Pipeline
+
+### Candidate generation
+
+| Source | Role |
+|--------|------|
+| **User-based CF** | Similar users’ preferences suggest unseen items |
+| **Item-based CF** | Items similar to what the user already liked |
+| **Content-based** | TF-IDF similarity from text metadata |
+| **Matrix factorization (SVD)** | Latent factors for denser scoring on sparse matrices |
+| **ANN / vector index** | Fast neighborhood search over item embeddings (content space) |
+
+### Ranking
+
+- **Hybrid** combination of retriever scores with **dynamic weights** (activity-aware)
+- **Re-ranking:** popularity vs novelty, simple **genre diversity** cap
+- **LTR (v2):** pointwise gradient boosting regressor trained on ratings; blends with base scores
+
+### Cold start
+
+- **New user:** popular / global signals until enough interactions exist  
+- **New item:** content similarity when collaborative signals are weak  
+
+---
+
+## Real-Time System
+
+- **`POST /events/interaction`** — `impression`, `click`, `watch` with optional watch duration  
+- **`user_features`** table + Redis hash for rolling **click / impression / watch / last_active**  
+- **Kafka (optional):** API can publish events; **`scripts/run_kafka_consumer.py`** applies stream updates (skips double-apply when `feature_applied` is set)  
+- **`POST /jobs/precompute`** — warm caches for active users  
+
+---
+
+## Experimentation & Evaluation
+
+| Area | What I shipped |
+|------|------------------|
+| **A/B** | `strategy=v1` vs `v2`; summaries under `/experiments/*` |
+| **Bandit** | `strategy=auto` + Thompson Sampling over CTR (`ENABLE_BANDIT_AUTO`) |
+| **Online** | `/experiments/performance` — impressions, clicks, watches, CTR |
+| **Offline** | `scripts/evaluate_offline.py` — P@K, R@K, MAP@K, NDCG@K, coverage |
+
+---
+
+## Tech Stack
+
+| Layer | Technologies |
+|-------|----------------|
+| **Backend** | FastAPI, Uvicorn, Pydantic |
+| **ML** | NumPy, Pandas, scikit-learn; optional FAISS |
+| **Data** | PostgreSQL, SQLAlchemy, Alembic |
+| **Cache / queue** | Redis, Kafka (kafka-python) |
+| **Observability** | prometheus-client, Prometheus + Grafana (Compose) |
+| **UI** | Static frontend, Streamlit (optional) |
+
+---
 
 ## Project Structure
 
 ```text
 app/
-  main.py
-  api/
-    routes.py
-  db/
-    config.py
-    database.py
-  models/
-    user.py
-    item.py
-    rating.py
-  schemas/
-    user.py
-    item.py
-    rating.py
-    recommendation.py
-  services/
-    cache.py
-    logger.py
-    recommendation_service.py
-  ml/
-    recommender.py
+  main.py                 # FastAPI app, metrics middleware, static UI mount
+  api/routes.py           # HTTP endpoints
+  db/                     # config, engine, sessions
+  models/                 # ORM: users, items, ratings, events, experiments, features
+  schemas/                # Pydantic request/response models
+  services/               # recommendations, cache, LTR, Kafka, features, interactions
+  ml/                     # recommender engine, vector index
+alembic/                  # database migrations
+frontend/                 # Web UI (HTML/CSS/JS)
+ops/prometheus.yml        # Prometheus scrape config
 scripts/
   load_sample_data.py
-streamlit_app.py
+  evaluate_offline.py
+  train_ranker.py
+  run_kafka_consumer.py
+docker-compose.yml
+Dockerfile
+postman_collection.json
 requirements.txt
 .env.example
-README.md
+LICENSE
 ```
 
-## Setup
+---
 
-1. Create virtual environment and install dependencies:
+## Setup Instructions
+
+### 1. Virtual environment
 
 ```bash
 python -m venv .venv
@@ -57,186 +210,104 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-2. Create PostgreSQL database:
+### 2. Database
 
-- DB name: `recommendation_db`
-- Update `.env` from `.env.example` with your credentials.
+- I use a database named `recommendation_db` by default; point `DATABASE_URL` at whatever you create.
+- Copy `.env.example` to `.env` and fill in `DATABASE_URL`, `REDIS_URL`, and the feature flags I documented there.
 
-3. (Optional) Start Redis and set:
-
-- `ENABLE_REDIS_CACHE=true`
-- `REDIS_URL=redis://localhost:6379/0`
-
-## Database Migrations (Alembic)
-
-Run all migrations:
+### 3. Migrations (recommended)
 
 ```bash
 alembic upgrade head
 ```
 
-Create a new migration:
-
-```bash
-alembic revision -m "your change summary"
-```
-
-## Run Backend
+### 4. Run backend
 
 ```bash
 uvicorn app.main:app --reload
 ```
 
-API docs: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+- **API docs:** [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)  
+- **Web UI:** [http://127.0.0.1:8000/](http://127.0.0.1:8000/)  
+- **Metrics:** [http://127.0.0.1:8000/metrics](http://127.0.0.1:8000/metrics)
 
-## Load Sample Data
+### 5. Sample data
 
 ```bash
 python scripts/load_sample_data.py
 ```
 
-## Run Streamlit UI (Optional)
+### 6. Streamlit (optional)
 
 ```bash
 streamlit run streamlit_app.py
 ```
 
-## API Endpoints
-
-- `POST /user` -> create user
-- `POST /item` -> add item
-- `POST /rate` -> rate item (upserts rating)
-- `GET /recommend/{user_id}?n=10` -> hybrid Top-N recommendations
-- `GET /similar/{item_id}?n=10` -> similar items
-- `GET /experiments/summary` -> A/B impression summary and active model version
-- `GET /experiments/performance` -> variant-wise CTR and watch conversion
-- `GET /experiments/bandit` -> Thompson Sampling priors/posteriors
-- `POST /events/interaction` -> ingest real-time behavior events
-- `GET /features/{user_id}` -> online user feature snapshot
-- `GET /metrics` -> Prometheus metrics
-- `POST /jobs/precompute?n=20&limit_users=200` -> cache warmer job for active users
-
-## ML Design
-
-- Builds sparse user-item matrix from ratings.
-- Applies time-decay on interactions to prioritize recent behavior.
-- Uses confidence weighting by user interaction density.
-- Mixes explicit rating with implicit signal for robust sparse learning.
-- Computes cosine similarity:
-  - User-user matrix for user-CF.
-  - Item-item matrix for item-CF.
-- Learns latent factors with `TruncatedSVD` for matrix factorization.
-- Builds content vectors via TF-IDF from `genre + tags + description`.
-- Hybrid score combines weighted components with dynamic user-aware weights.
-- Uses 2-stage recommendation flow:
-  - candidate generation (user-CF, item-CF, content, SVD)
-  - re-ranking (novelty + popularity balance + diversity filter)
-- Cold start:
-  - New user: popular items fallback.
-  - New item: content-based similarity fallback.
-- Level 3 additions:
-  - Model version registry (`model_versions`)
-  - A/B assignment framework (`ab_assignments`) with `auto|v1|v2` strategy
-  - Recommendation event logging (`recommendation_events`)
-  - Offline evaluator (`scripts/evaluate_offline.py`)
-
-### A/B Testing Quick Check
-
-- `GET /recommend/1?n=10&strategy=auto` (assigned variant)
-- `GET /recommend/1?n=10&strategy=v1` (control)
-- `GET /recommend/1?n=10&strategy=v2` (advanced ranker)
-- `GET /experiments/summary`
-
-### Offline Evaluation
-
-```bash
-python scripts/evaluate_offline.py
-```
-
-## Phase 1 Real-Time Foundation
-
-- Real-time interaction ingestion:
-  - event types: `impression`, `click`, `watch`
-- Online feature updates:
-  - `click_count`, `impression_count`, `watch_seconds`, `last_active_at`
-  - persisted in `user_features` + cached in Redis (when enabled)
-- Kafka event streaming (optional):
-  - set `ENABLE_KAFKA=true`
-  - configure `KAFKA_BOOTSTRAP_SERVERS` and `KAFKA_TOPIC_EVENTS`
-  - run consumer worker for stream-driven feature updates:
-    - `python scripts/run_kafka_consumer.py`
-- Observability:
-  - Prometheus counters/histograms at `/metrics`
-
-## Phase 2 Retrieval at Scale
-
-- ANN/vector retrieval:
-  - item embeddings indexed through `app/ml/vector_index.py`
-  - FAISS used automatically if available, else sklearn fallback
-- Candidate generation upgraded:
-  - hybrid candidate pool now includes ANN retrieval candidates
-- Similar items optimized:
-  - `/similar/{item_id}` now prefers vector index neighbors first
-- Precompute and warm cache:
-  - `/jobs/precompute` warms per-user recommendation cache for active users
-  - also builds segment fallback cache (`recommendations:segment:popular:*`)
-
-## Phase 3 Ranking + Experiment Intelligence
-
-- Learning-to-rank layer:
-  - `app/services/ltr_ranker.py` (GradientBoostingRegressor)
-  - trained on historical ratings
-  - used to rerank `v2` candidate list before final response
-- Ranker persistence:
-  - saved at `artifacts/ltr_ranker.joblib`
-  - loaded on service startup if available
-- Advanced offline evaluation:
-  - `scripts/evaluate_offline.py` now reports:
-    - Precision@K
-    - Recall@K
-    - MAP@K
-    - NDCG@K
-    - Coverage@K
-- Online KPI reporting:
-  - `/experiments/performance` for variant metrics:
-    - impressions
-    - clicks
-    - watches
-    - CTR
-    - watch conversion rate
-- Adaptive experiment selection:
-  - `strategy=auto` now supports Thompson Sampling when `ENABLE_BANDIT_AUTO=true`
-  - posterior snapshot endpoint: `/experiments/bandit`
-
-### Phase 3 Utility Scripts
-
-```bash
-python scripts/train_ranker.py
-python scripts/evaluate_offline.py
-```
-
-## Docker Compose Stack
-
-Run complete local stack (API + Postgres + Redis + Kafka + Prometheus + Grafana):
+### 7. Docker Compose (full stack)
 
 ```bash
 docker compose up --build
 ```
 
-Detached mode:
+Services: API `8000`, Postgres `5432`, Redis `6379`, Kafka `9092`, Prometheus `9090`, Grafana `3000` (default admin/admin).
 
-```bash
-docker compose up -d --build
-```
+---
 
-Service URLs:
+## API Overview
 
-- API: `http://localhost:8000`
-- Prometheus: `http://localhost:9090`
-- Grafana: `http://localhost:3000` (admin/admin)
+| Method | Path | Purpose |
+|--------|------|---------|
+| `GET` | `/`, `/health` | Web UI, health |
+| `POST` | `/user`, `/item`, `/rate` | Create entities, submit ratings |
+| `GET` | `/recommend/{user_id}` | Top-N recommendations (`strategy`: `auto`, `v1`, `v2`) |
+| `GET` | `/similar/{item_id}` | Similar items |
+| `POST` | `/events/interaction` | Real-time behavior events |
+| `GET` | `/features/{user_id}` | Online feature snapshot |
+| `GET` | `/experiments/summary`, `/performance`, `/bandit` | Experiment analytics |
+| `POST` | `/jobs/precompute` | Cache warming |
+| `GET` | `/metrics` | Prometheus |
 
-## Production Notes
+Full request/response schemas live in **OpenAPI** at `/docs`.
 
-- Move model rebuild to async/background workers for high write throughput.
-- Add migration tooling (Alembic), CI tests, and auth for production deployment.
-- Consider periodic batch precomputation and Redis warming for low-latency reads.
+---
+
+## Scaling & Production Notes
+
+What I’d do next at serious traffic: move **model rebuild** off the request path (Celery/RQ or similar), lean harder on **Redis** for hot users and TTL tuning, and rely on **Kafka + a proper stream processor** for feature freshness. I’d also add **auth**, rate limits, and **CI** that runs tests and `alembic upgrade`. For huge catalogs, I’d move ANN to a **vector DB** and rebuild indexes on a schedule.
+
+---
+
+## Roadmap
+
+Things I’m interested in adding over time:
+
+- Deep learning: **two-tower** or **NCF**-style models  
+- A real **feature store** (e.g. Feast) for online/offline consistency  
+- **LightGBM / XGBoost** ranking with richer behavioral features  
+- **Graph** recommendations (e.g. Neo4j)  
+- **Kubernetes** and staged rollouts  
+
+---
+
+## Contributing
+
+Pull requests are welcome. For larger changes, open an issue first — saves duplicate work.
+
+1. Fork the repo  
+2. Branch off (`git checkout -b feature/your-topic`)  
+3. Commit with a clear message  
+4. Open a PR  
+
+---
+
+## License
+
+Licensed under the [MIT License](LICENSE). See [`LICENSE`](LICENSE) in the repo root (Copyright (c) 2026 Aditya).
+
+---
+
+## Author
+
+**Aditya Paswan**
+
+Personal project — backend + ML + infra practice. Connect on GitHub / LinkedIn if you want to chat about recommendations or hiring.
